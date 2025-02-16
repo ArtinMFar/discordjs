@@ -1,0 +1,136 @@
+from flask import Flask, request, Response
+import requests
+from bs4 import BeautifulSoup
+import re
+
+app = Flask(__name__)
+
+# Mapping from prefix letter to the URL category suffix.
+letter_to_category = {
+    "C": "Class",
+    "F": "Function",
+    "E": "Enum",
+    "I": "Interface",
+    "T": "Type",
+    "V": "Variable"
+}
+
+# Abbreviated lookup data – add more items as needed.
+lookup_data = """
+C ActionRow
+C ActionRowBuilder
+C Activity
+C Guild
+C Message
+F applicationDirectory
+F blockQuote
+F bold
+E ActivityFlags
+E ApplicationCommandType
+I ActionRowData
+I ActionRowModalData
+T AchievementIconFormat
+T SomeTypeExample
+V ALLOWED_EXTENSIONS
+V Routes
+V version
+"""
+
+# Build a lookup table mapping identifier name to its category.
+lookup_table = {}
+for line in lookup_data.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    # Skip header lines (if any) like "Classes", "Functions", etc.
+    if line in {"Classes", "Functions", "Enums", "Interfaces", "Types", "Variables"}:
+        continue
+    match = re.match(r"^([CFEITV])\s+(.+)$", line)
+    if match:
+        letter, name = match.groups()
+        category = letter_to_category.get(letter)
+        if category:
+            lookup_table[name] = category
+
+# List of candidate categories to try if a term isn't in our lookup.
+candidate_categories = ["Class", "Function", "Enum", "Interface", "Type", "Variable"]
+
+# Fetch and scrape the Discord.js main page once.
+MAIN_PAGE_URL = "https://discord.js.org/docs/packages/discord.js/main"
+try:
+    main_response = requests.get(MAIN_PAGE_URL)
+    main_response.raise_for_status()
+    soup_main = BeautifulSoup(main_response.text, 'html.parser')
+    main_page_text = soup_main.get_text(separator="\n", strip=True)
+except Exception as e:
+    main_page_text = f"Error fetching discord.js.org main page: {e}"
+
+@app.route('/')
+def index():
+    query = request.args.get('lookfor')
+    if not query:
+        return "Please provide the 'lookfor' query parameter in the URL (e.g. ?lookfor=(ActionRow))."
+    
+    # Extract search terms from the query parameter (terms enclosed in parentheses).
+    items = re.findall(r'\((.*?)\)', query)
+    if not items:
+        return "No valid search items found in the query parameter. Use the format: ?lookfor=(ItemName)"
+    
+    combined_result = ""
+    
+    for item in items:
+        category = lookup_table.get(item)  # Look up the category from our table (if present)
+        url = None
+        content = None
+        
+        if category:
+            # Construct the URL using the mapped category.
+            url = f"https://discord.js.org/docs/packages/discord.js/main/{item}:{category}"
+            try:
+                response = requests.get(url)
+                if response.status_code == 200:
+                    content = response.text
+            except Exception as e:
+                content = None
+        
+        # If not found in the lookup table or if the URL did not return a valid page,
+        # try every candidate category.
+        if not content:
+            for cat in candidate_categories:
+                test_url = f"https://discord.js.org/docs/packages/discord.js/main/{item}:{cat}"
+                try:
+                    test_response = requests.get(test_url)
+                    if test_response.status_code == 200:
+                        content = test_response.text
+                        category = cat  # Use the category that worked.
+                        url = test_url
+                        break
+                except Exception:
+                    continue
+        
+        if content:
+            # Parse the scraped documentation page.
+            soup = BeautifulSoup(content, 'html.parser')
+            scraped_text = soup.get_text(separator="\n", strip=True)
+            # Prepend the main page text with the mandatory header.
+            combined_result += (
+                "This is discord.js.org start page, it is mandatory and always included\n"
+                f"{main_page_text}\n\n"
+                f"Start of {item} ({category})\n"
+                f"{scraped_text}\n\n"
+            )
+        else:
+            # If no valid page was found for this term, output a friendly error with some jokes.
+            joke_message = (
+                f"Oops! We couldn't find any documentation for '{item}'.\n"
+                "Maybe it's hiding in the void like my missing semicolon!\n"
+                "Perhaps it was abducted by aliens or never existed in the first place.\n"
+                "Don't worry—sometimes our code takes a coffee break. Check your spelling or consult the magic 8-ball.\n\n"
+            )
+            combined_result += joke_message
+
+    return Response(combined_result, mimetype='text/plain')
+
+if __name__ == '__main__':
+    # Run the app locally on port 5000.
+    app.run(host='0.0.0.0', port=5000, debug=True)
